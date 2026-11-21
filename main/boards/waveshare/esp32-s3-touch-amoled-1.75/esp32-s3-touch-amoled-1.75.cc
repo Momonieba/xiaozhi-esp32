@@ -154,6 +154,7 @@ private:
     esp_io_expander_handle_t io_expander = NULL;
     PowerSaveTimer* power_save_timer_;
 
+    // 触发 1.75 单板构建（包含情绪优先显示修复），勿删
     void InitializePowerSaveTimer() {
         // 桌面常供电使用：禁用闲置 300 秒后的 pmic_->PowerOff()，只保留息屏。
 
