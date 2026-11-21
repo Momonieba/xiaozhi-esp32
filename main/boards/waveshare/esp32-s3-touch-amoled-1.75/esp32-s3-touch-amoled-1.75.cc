@@ -592,6 +592,14 @@ public:
         });
     }
 
+    // WifiBoard::StartNetwork() 内部完成 esp_netif/LWIP 初始化，
+    // 之后 httpd_start 才安全（构造函数里启动会 assert tcpip Invalid mbox）。
+    virtual void StartNetwork() override {
+        WifiBoard::StartNetwork();
+        ESP_LOGI(TAG, "StartNetwork done, starting control HTTP");
+        InitializeControlHttp();
+    }
+
     virtual AudioCodec* GetAudioCodec() override {
         static BoxAudioCodec audio_codec(
             i2c_bus_, 
