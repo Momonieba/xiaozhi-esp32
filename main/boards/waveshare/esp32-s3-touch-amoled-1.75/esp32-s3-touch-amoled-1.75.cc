@@ -538,6 +538,9 @@ private:
     }
 
     void InitializeControlHttp() {
+        if (control_httpd_ != nullptr) {
+            return;
+        }
         httpd_config_t config = HTTPD_DEFAULT_CONFIG();
         config.server_port = 8080;
         config.ctrl_port = 32768;
@@ -579,7 +582,14 @@ public:
         InitializeTouch();
         InitializeButtons();
         InitializeTools();
-        InitializeControlHttp();
+        // LWIP 未就绪时 httpd_start 会触发 assert(tcpip Invalid mbox)，
+        // 因此等网络连接建立后再启动控制接口。
+        SetNetworkEventCallback([this](NetworkEvent event, const std::string& data) {
+            (void)data;
+            if (event == NetworkEvent::Connected) {
+                InitializeControlHttp();
+            }
+        });
     }
 
     virtual AudioCodec* GetAudioCodec() override {
