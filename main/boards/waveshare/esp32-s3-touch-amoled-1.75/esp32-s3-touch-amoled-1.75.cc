@@ -1,3 +1,4 @@
+// grokbot-175: GrokbotDisplay integrated
 #include "wifi_board.h"
 #include "grokbot_display.h"
 #include "display/lcd_display.h"
