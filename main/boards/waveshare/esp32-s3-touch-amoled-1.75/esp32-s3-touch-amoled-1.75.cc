@@ -27,6 +27,86 @@
 
 #define TAG "WaveshareEsp32s3TouchAMOLED1inch75"
 
+namespace Imu {
+// QMI8658 六轴：I2C 地址 0x6A/0x6B，平放时 z 约 ±1000mg
+static i2c_master_dev_handle_t device = nullptr;
+
+static esp_err_t Read(uint8_t reg, uint8_t* data, size_t length) {
+    if (device == nullptr) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    return i2c_master_transmit_receive(device, &reg, 1, data, length, 50);
+}
+
+static esp_err_t Write(uint8_t reg, uint8_t value) {
+    if (device == nullptr) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    const uint8_t data[] = {reg, value};
+    return i2c_master_transmit(device, data, sizeof(data), 50);
+}
+
+static int16_t Decode(const uint8_t* data) {
+    return static_cast<int16_t>(static_cast<uint16_t>(data[0]) |
+                                (static_cast<uint16_t>(data[1]) << 8));
+}
+
+esp_err_t Init(i2c_master_bus_handle_t bus) {
+    if (device != nullptr) {
+        return ESP_OK;
+    }
+    esp_err_t added = ESP_ERR_NOT_FOUND;
+    for (uint8_t address : {uint8_t{0x6A}, uint8_t{0x6B}}) {
+        if (i2c_master_probe(bus, address, 50) != ESP_OK) {
+            continue;
+        }
+        i2c_device_config_t config = {};
+        config.device_address = address;
+        config.scl_speed_hz = 400000;
+        added = i2c_master_bus_add_device(bus, &config, &device);
+        break;
+    }
+    if (added != ESP_OK) {
+        return added;
+    }
+    uint8_t id = 0;
+    esp_err_t ret = Read(0x00, &id, 1);
+    if (ret == ESP_OK && id != 0x05) {
+        ret = ESP_ERR_NOT_FOUND;
+    }
+    if (ret == ESP_OK) {
+        ret = Write(0x02, 0x60);  // CTRL1: 寄存器地址自增
+    }
+    if (ret == ESP_OK) {
+        ret = Write(0x03, 0x25);  // CTRL2: ±8g, 250Hz
+    }
+    if (ret == ESP_OK) {
+        ret = Write(0x08, 0x01);  // CTRL8: 使能加速度计
+    }
+    if (ret != ESP_OK && device != nullptr) {
+        i2c_master_bus_rm_device(device);
+        device = nullptr;
+    }
+    return ret;
+}
+
+bool ReadAccel(int& x, int& y, int& z) {
+    if (device == nullptr) {
+        return false;
+    }
+    uint8_t data[6] = {};
+    if (Read(0x35, data, sizeof(data)) != ESP_OK) {
+        return false;
+    }
+    x = static_cast<int>(Decode(data)) * 1000 / 4096;
+    y = static_cast<int>(Decode(data + 2)) * 1000 / 4096;
+    z = static_cast<int>(Decode(data + 4)) * 1000 / 4096;
+    return true;
+}
+}  // namespace Imu
+
+
+
 class Pmic : public Axp2101 {
 public:
     Pmic(i2c_master_bus_handle_t i2c_bus, uint8_t addr) : Axp2101(i2c_bus, addr) {
@@ -316,10 +396,105 @@ private:
             });
     }
 
+    static void ImuTaskEntry(void* arg) {
+        static_cast<WaveshareEsp32s3TouchAMOLED1inch75*>(arg)->ImuTask();
+    }
+
+    // 手势 -> 表情：摇晃=困惑、倒扣=睡觉、拿起=醒来
+    void ImuTask() {
+        int px = 0, py = 0, pz = 0;
+        Imu::ReadAccel(px, py, pz);
+        int shake = 0;
+        int64_t still_since = esp_timer_get_time();
+        int64_t face_down_since = 0;
+        int64_t last_emotion_us = 0;
+        int64_t last_axis_log_us = 0;
+
+        while (true) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+            int x = 0, y = 0, z = 0;
+            if (!Imu::ReadAccel(x, y, z)) {
+                continue;
+            }
+
+            const int64_t now = esp_timer_get_time();
+            const int delta = abs(x - px) + abs(y - py) + abs(z - pz);
+            px = x;
+            py = y;
+            pz = z;
+
+            // 每 60 秒打印一次当前姿态，便于校准倒扣方向
+            if (now - last_axis_log_us > 60000000) {
+                last_axis_log_us = now;
+                ESP_LOGI(TAG, "IMU: x=%d y=%d z=%d mg", x, y, z);
+            }
+
+            // 对话中不插手显示
+            if (Application::GetInstance().GetDeviceState() != kDeviceStateIdle) {
+                shake = 0;
+                face_down_since = 0;
+                still_since = now;
+                continue;
+            }
+
+            // 摇晃：连续多次加速度突变
+            if (delta > 1300) {
+                if (shake < 10) {
+                    ++shake;
+                }
+            } else if (shake > 0) {
+                --shake;
+            }
+            if (shake >= 3 && now - last_emotion_us > 2500000) {
+                shake = 0;
+                last_emotion_us = now;
+                GetDisplay()->SetEmotion("confused");
+                ESP_LOGI(TAG, "Gesture: shake -> confused");
+            }
+
+            // 倒扣/平放：z 持续反向超过 1.2 秒
+            if (z < -650) {
+                if (face_down_since == 0) {
+                    face_down_since = now;
+                } else if (now - face_down_since > 1200000 &&
+                           now - last_emotion_us > 2500000) {
+                    last_emotion_us = now;
+                    GetDisplay()->SetEmotion("sleeping");
+                    ESP_LOGI(TAG, "Gesture: face down -> sleeping");
+                }
+            } else {
+                face_down_since = 0;
+            }
+
+            // 拿起：静止超过 3 秒后出现明显运动
+            if (delta > 900) {
+                if (now - still_since > 3000000 &&
+                    now - last_emotion_us > 2500000) {
+                    last_emotion_us = now;
+                    GetDisplay()->SetEmotion("waking");
+                    ESP_LOGI(TAG, "Gesture: picked up -> waking");
+                }
+                still_since = now;
+            }
+        }
+    }
+
+    void InitializeImu() {
+        esp_err_t ret = Imu::Init(i2c_bus_);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "IMU init failed (%s), gesture disabled",
+                     esp_err_to_name(ret));
+            return;
+        }
+        ESP_LOGI(TAG, "IMU QMI8658 ready (gesture interact enabled)");
+        xTaskCreate(&ImuTaskEntry, "imu_gesture", 4096, this, 3, nullptr);
+    }
+
 public:
     WaveshareEsp32s3TouchAMOLED1inch75() : boot_button_(BOOT_BUTTON_GPIO) {
         InitializePowerSaveTimer();
         InitializeCodecI2c();
+        InitializeImu();
 #if CONFIG_BOARD_TYPE_WAVESHARE_ESP32_S3_TOUCH_AMOLED_1_75
         InitializeTca9554();
 #endif
