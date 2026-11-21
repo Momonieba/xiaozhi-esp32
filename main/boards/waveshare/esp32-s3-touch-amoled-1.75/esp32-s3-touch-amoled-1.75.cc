@@ -155,10 +155,12 @@ private:
     PowerSaveTimer* power_save_timer_;
 
     void InitializePowerSaveTimer() {
-        power_save_timer_ = new PowerSaveTimer(-1, 60, 300);
+        // 桌面常供电使用：禁用闲置 300 秒后的 pmic_->PowerOff()，只保留息屏。
+
+        power_save_timer_ = new PowerSaveTimer(-1, 60, -1);
         power_save_timer_->OnEnterSleepMode([this]() {
             GetDisplay()->SetPowerSaveMode(true);
-            GetBacklight()->SetBrightness(20); });
+            GetBacklight()->SetBrightness(0); });
         power_save_timer_->OnExitSleepMode([this]() {
             GetDisplay()->SetPowerSaveMode(false);
             GetBacklight()->RestoreBrightness(); });
