@@ -27,6 +27,10 @@
 
 #define TAG "WaveshareEsp32s3TouchAMOLED1inch75"
 
+#include <esp_http_server.h>
+#include <esp_wifi.h>
+
+
 namespace Imu {
 // QMI8658 六轴：I2C 地址 0x6A/0x6B，平放时 z 约 ±1000mg
 static i2c_master_dev_handle_t device = nullptr;
@@ -490,6 +494,77 @@ private:
         xTaskCreate(&ImuTaskEntry, "imu_gesture", 4096, this, 3, nullptr);
     }
 
+    httpd_handle_t control_httpd_ = nullptr;
+
+    static esp_err_t EmotionHandler(httpd_req_t* req) {
+        auto* self = static_cast<WaveshareEsp32s3TouchAMOLED1inch75*>(req->user_ctx);
+        char query[96] = {};
+        char name[40] = "happy";
+        if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+            httpd_query_key_value(query, "name", name, sizeof(name));
+        }
+        const bool ok = self->GetDisplay()->SetEmotion(name);
+        char resp[128];
+        snprintf(resp, sizeof(resp), "{\"ok\":%s,\"emotion\":\"%s\"}",
+                 ok ? "true" : "false", name);
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+        httpd_resp_send(req, resp, HTTPD_RESP_USE_STRLEN);
+        ESP_LOGI(TAG, "HTTP /api/emotion name=%s ok=%d", name, ok ? 1 : 0);
+        return ESP_OK;
+    }
+
+    static esp_err_t StatusHandler(httpd_req_t* req) {
+        auto* self = static_cast<WaveshareEsp32s3TouchAMOLED1inch75*>(req->user_ctx);
+        int level = 0;
+        bool charging = false;
+        bool discharging = false;
+        self->GetBatteryLevel(level, charging, discharging);
+        wifi_ap_record_t ap = {};
+        int rssi = 0;
+        if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
+            rssi = ap.rssi;
+        }
+        const int state = static_cast<int>(Application::GetInstance().GetDeviceState());
+        char resp[256];
+        snprintf(resp, sizeof(resp),
+                 "{\"ok\":true,\"battery\":%d,\"charging\":%s,"
+                 "\"rssi\":%d,\"state\":%d}",
+                 level, charging ? "true" : "false", rssi, state);
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+        httpd_resp_send(req, resp, HTTPD_RESP_USE_STRLEN);
+        return ESP_OK;
+    }
+
+    void InitializeControlHttp() {
+        httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+        config.server_port = 8080;
+        config.ctrl_port = 32768;
+        config.stack_size = 5120;
+        config.lru_purge_enable = true;
+        if (httpd_start(&control_httpd_, &config) != ESP_OK) {
+            ESP_LOGW(TAG, "control httpd failed to start on :8080");
+            return;
+        }
+
+        static const httpd_uri_t emotion_uri = {
+            .uri = "/api/emotion",
+            .method = HTTP_GET,
+            .handler = EmotionHandler,
+            .user_ctx = this,
+        };
+        static const httpd_uri_t status_uri = {
+            .uri = "/api/status",
+            .method = HTTP_GET,
+            .handler = StatusHandler,
+            .user_ctx = this,
+        };
+        httpd_register_uri_handler(control_httpd_, &emotion_uri);
+        httpd_register_uri_handler(control_httpd_, &status_uri);
+        ESP_LOGI(TAG, "Control HTTP listening on :8080");
+    }
+
 public:
     WaveshareEsp32s3TouchAMOLED1inch75() : boot_button_(BOOT_BUTTON_GPIO) {
         InitializePowerSaveTimer();
@@ -504,6 +579,7 @@ public:
         InitializeTouch();
         InitializeButtons();
         InitializeTools();
+        InitializeControlHttp();
     }
 
     virtual AudioCodec* GetAudioCodec() override {
