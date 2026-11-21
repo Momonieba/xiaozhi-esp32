@@ -381,11 +381,28 @@ const char* GrokbotDisplay::EffectiveAnimationName() {
     }
 
     const char* status = requested_status_.load();
-    if (status != nullptr && strcmp(status, "idle") != 0) {
+    const char* emotion = requested_emotion_.load();
+
+    // 过渡/异常状态优先，保证能看出设备在加载或出错
+    if (status != nullptr && (strcmp(status, "loading") == 0 ||
+                              strcmp(status, "connecting") == 0 ||
+                              strcmp(status, "failed") == 0 ||
+                              strcmp(status, "uploading") == 0 ||
+                              strcmp(status, "waiting") == 0 ||
+                              strcmp(status, "radar") == 0 ||
+                              strcmp(status, "searching") == 0)) {
         return status;
     }
-    const char* emotion = requested_emotion_.load();
-    return emotion != nullptr ? emotion : (status != nullptr ? status : "idle");
+
+    // 情绪优先于 listening/streaming，这样对话中也能看到表情变化
+    if (emotion != nullptr && strcmp(emotion, "idle") != 0) {
+        return emotion;
+    }
+
+    if (status != nullptr) {
+        return status;
+    }
+    return "idle";
 }
 
 bool GrokbotDisplay::EnsurePlayer() {
