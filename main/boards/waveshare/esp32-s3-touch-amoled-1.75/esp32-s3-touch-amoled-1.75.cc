@@ -428,7 +428,7 @@ private:
             pz = z;
 
             // 每 60 秒打印一次当前姿态，便于校准倒扣方向
-            if (now - last_axis_log_us > 60000000) {
+            if (now - last_axis_log_us > 15000000) {
                 last_axis_log_us = now;
                 ESP_LOGI(TAG, "IMU: x=%d y=%d z=%d mg", x, y, z);
             }
@@ -441,19 +441,21 @@ private:
                 continue;
             }
 
-            // 摇晃：连续多次加速度突变
-            if (delta > 1300) {
+            // 摇晃：连续多次加速度突变（阈值放宽，摇动必须优先于"拿起"）
+            if (delta > 800) {
                 if (shake < 10) {
                     ++shake;
                 }
             } else if (shake > 0) {
                 --shake;
             }
+            bool shake_fired = false;
             if (shake >= 3 && now - last_emotion_us > 2500000) {
                 shake = 0;
+                shake_fired = true;
                 last_emotion_us = now;
                 GetDisplay()->SetEmotion("confused");
-                ESP_LOGI(TAG, "Gesture: shake -> confused");
+                ESP_LOGI(TAG, "Gesture: shake -> confused (delta=%d)", delta);
             }
 
             // 倒扣/平放：z 持续反向超过 1.2 秒
@@ -470,14 +472,14 @@ private:
                 face_down_since = 0;
             }
 
-            // 拿起：静止超过 3 秒后出现明显运动
+            // 拿起：静止超过 3 秒后出现"剧烈"位移（阈值提高，避免摇动误判成拿起）
+            if (!shake_fired && delta > 2500 && now - still_since > 3000000 &&
+                now - last_emotion_us > 2500000) {
+                last_emotion_us = now;
+                GetDisplay()->SetEmotion("waking");
+                ESP_LOGI(TAG, "Gesture: picked up -> waking (delta=%d)", delta);
+            }
             if (delta > 900) {
-                if (now - still_since > 3000000 &&
-                    now - last_emotion_us > 2500000) {
-                    last_emotion_us = now;
-                    GetDisplay()->SetEmotion("waking");
-                    ESP_LOGI(TAG, "Gesture: picked up -> waking");
-                }
                 still_since = now;
             }
         }
